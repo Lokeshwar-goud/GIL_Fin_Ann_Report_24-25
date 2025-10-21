@@ -75,8 +75,8 @@ def section_segmentation(raw_text):
     Heuristic: detect lines that are all-caps or Title Case and short -> treat as headers
     Returns list of {'section_heading', 'content'}
     """
-    lines = [ln.strip() for ln in raw_text.split('
-') if ln.strip()]
+    lines = [ln.strip() for ln in raw_text.split('\\n') if ln.strip()]
+
     header_idxs = []
     for i, ln in enumerate(lines):
         words = ln.split()
