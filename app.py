@@ -247,68 +247,55 @@ with col2:
     wc_fig = plot_wordcloud(dict(top_words))
     st.pyplot(wc_fig)
 
-# Vectorization & LDA
-st.subheader("Topic Modeling (LDA)")
-st.markdown(f"Documents used for modelling: **{len(documents)}** (sections: {use_sections}) — CountVectorizer `min_df={min_df}` — Topics: **{n_topics}**")
+# ---------------------------
+# Topic Modeling (using Gensim)
+# ---------------------------
+from gensim import corpora, models
 
-with st.spinner("Building document-term matrix and running LDA..."):
-    vectorizer = CountVectorizer(max_df=0.9, min_df=min_df, ngram_range=(1,1))
-    dtm = vectorizer.fit_transform(documents)
-    vocab = vectorizer.get_feature_names_out()
-    tfidf_vectorizer = TfidfVectorizer(max_df=0.9, min_df=min_df)
-    tfidf_mat = tfidf_vectorizer.fit_transform(documents)
+st.subheader("Topic Modeling (LDA - Gensim)")
+st.markdown(f"Documents used: **{len(documents)}** — Topics: **{n_topics}**")
 
-    if dtm.shape[1] < 3:
-        st.error("DTM has too few features for LDA. Consider lowering min_df or providing more text.")
-    else:
-        model = run_lda(dtm.toarray(), n_topics=n_topics, n_iter=n_iter)
-        topic_word = model.topic_word_
-        n_top_words = 12
-        topic_top_words = []
-        for i, topic_dist in enumerate(topic_word):
-            top_word_indices = topic_dist.argsort()[-n_top_words:][::-1]
-            words = [vocab[idx] for idx in top_word_indices]
-            topic_top_words.append(words)
+# Tokenize each document
+texts = [doc.split() for doc in documents]
+dictionary = corpora.Dictionary(texts)
+corpus = [dictionary.doc2bow(text) for text in texts]
 
-        # Display topics
-        for i, words in enumerate(topic_top_words):
-            st.markdown(f"**Topic {i+1}**: " + ", ".join(words))
+with st.spinner("Training LDA model using Gensim..."):
+    lda_model = models.LdaModel(
+        corpus=corpus,
+        id2word=dictionary,
+        num_topics=n_topics,
+        passes=10,
+        random_state=42
+    )
 
-        # Document-topic distribution and dominant topics
-        doc_topic = model.doc_topic_
-        dominant = np.argmax(doc_topic, axis=1) + 1  # 1-based
+st.success(f"LDA model trained successfully with {n_topics} topics!")
 
-        if use_sections:
-            df_sections['dominant_topic'] = dominant
-            df_sections['top_words'] = df_sections['dominant_topic'].apply(lambda t: ' '.join(topic_top_words[t-1]))
-            st.write("Sample sections with assigned dominant topic:")
-            st.dataframe(df_sections[['section_heading','dominant_topic','top_words']].head(15))
-            csv_sections = df_sections.to_csv(index=False).encode('utf-8')
-            st.download_button("Download sections + topics (CSV)", csv_sections, file_name="godrej_sections_with_topics.csv")
-        else:
-            df_pages['dominant_topic'] = dominant
-            df_pages['top_words'] = df_pages['dominant_topic'].apply(lambda t: ' '.join(topic_top_words[t-1]))
-            st.write("Sample pages with assigned dominant topic:")
-            st.dataframe(df_pages[['page','dominant_topic','top_words']].head(15))
-            csv_pages = df_pages.to_csv(index=False).encode('utf-8')
-            st.download_button("Download pages + topics (CSV)", csv_pages, file_name="godrej_pages_with_topics.csv")
+# Display the top words for each topic
+for idx, topic in lda_model.print_topics(num_topics=n_topics, num_words=10):
+    st.markdown(f"**Topic {idx+1}**: {topic}")
 
-        # Topic distribution chart
-        topic_counts = Counter(dominant)
-        topics_sorted = sorted(topic_counts.items())
-        x = [t for t,_ in topics_sorted]
-        y = [c for _,c in topics_sorted]
-        fig = go.Figure([go.Bar(x=x, y=y)])
-        fig.update_layout(title="Distribution of dominant topic across documents", xaxis_title="Topic", yaxis_title="Number of documents")
-        st.plotly_chart(fig, use_container_width=True)
+# Assign dominant topic for each document
+dominant_topics = []
+for doc_bow in corpus:
+    topic_probs = lda_model.get_document_topics(doc_bow)
+    dominant = max(topic_probs, key=lambda x: x[1])[0] + 1 if topic_probs else 0
+    dominant_topics.append(dominant)
 
-# Download other outputs
-st.subheader("Downloadable Outputs")
-if 'df_sentiments' in globals():
-    csv_sents = df_sentiments.to_csv(index=False).encode('utf-8')
-    st.download_button("Download sentence sentiments (CSV)", csv_sents, file_name="godrej_sentence_sentiments.csv")
-freq_csv = pd.DataFrame(top_words, columns=['word','freq']).to_csv(index=False).encode('utf-8')
-st.download_button("Download word frequency (CSV)", freq_csv, file_name="godrej_word_freq.csv")
+# Attach topic assignments
+if use_sections:
+    df_sections['dominant_topic'] = dominant_topics
+    st.dataframe(df_sections[['section_heading', 'dominant_topic']].head(10))
+    csv_sections = df_sections.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download sections + topics (CSV)", csv_sections, file_name="sections_with_topics.csv")
+else:
+    df_pages['dominant_topic'] = dominant_topics
+    st.dataframe(df_pages[['page', 'dominant_topic']].head(10))
+    csv_pages = df_pages.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download pages + topics (CSV)", csv_pages, file_name="pages_with_topics.csv")
 
-st.markdown("---")
-st.caption("Built for an NLP Mini Project — Godrej Industries Annual Report (FY 2024-25). ")
+# Visualize topic distribution
+topic_counts = pd.Series(dominant_topics).value_counts().sort_index()
+fig = go.Figure(data=[go.Bar(x=topic_counts.index, y=topic_counts.values)])
+fig.update_layout(title="Topic Distribution", xaxis_title="Topic", yaxis_title="Document Count")
+st.plotly_chart(fig, use_container_width=True)
