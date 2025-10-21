@@ -188,8 +188,7 @@ with st.expander("Preview: first 3 pages (raw text)"):
         st.write(df_pages.loc[i,'text'][:2000] + ("..." if len(df_pages.loc[i,'text']) > 2000 else ""))
 
 # Build full raw text and clean
-full_raw = " 
- ".join(df_pages['text'].fillna('').tolist())
+full_raw = " ".join(df_pages['text'].fillna('').tolist())
 full_clean = preprocess_text(full_raw, extra_stopwords=extra_stopwords)
 
 # Section segmentation attempt
