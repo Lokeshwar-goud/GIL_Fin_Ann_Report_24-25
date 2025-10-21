@@ -1,8 +1,7 @@
-
+# app.py
 import streamlit as st
 import pdfplumber
 import re
-import io
 import os
 from collections import Counter
 import pandas as pd
@@ -17,33 +16,32 @@ from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-import lda
-from tempfile import NamedTemporaryFile
+from gensim import corpora, models
 
 # ---------------------------
-# Initialization / setup
+# Streamlit Config
 # ---------------------------
 st.set_page_config(page_title="Godrej Annual Report — NLP Explorer",
                    page_icon="📄",
                    layout="wide",
                    initial_sidebar_state="expanded")
 
-# Ensure required NLTK corpora are downloaded (first run)
+# ---------------------------
+# NLTK Setup
+# ---------------------------
 @st.cache_resource
 def download_nltk_resources():
     nltk.download('punkt')
     nltk.download('stopwords')
     nltk.download('wordnet')
     nltk.download('omw-1.4')
-    nltk.download('punkt_tab', quiet=True)
-
 
 download_nltk_resources()
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
 # ---------------------------
-# Utility functions
+# Helper functions
 # ---------------------------
 def preprocess_text(text, remove_stopwords=True, lemmatize=True, extra_stopwords=None):
     if not isinstance(text, str):
@@ -71,12 +69,8 @@ def extract_pdf_text(file_stream):
     return pd.DataFrame(pages)
 
 def section_segmentation(raw_text):
-    """
-    Heuristic: detect lines that are all-caps or Title Case and short -> treat as headers
-    Returns list of {'section_heading', 'content'}
-    """
+    """Detect section headers heuristically"""
     lines = [ln.strip() for ln in raw_text.split('\\n') if ln.strip()]
-
     header_idxs = []
     for i, ln in enumerate(lines):
         words = ln.split()
@@ -102,20 +96,6 @@ def compute_sentiments(sentences):
         rows.append({'sentence': s, 'polarity': tb.sentiment.polarity, 'subjectivity': tb.sentiment.subjectivity})
     return pd.DataFrame(rows)
 
-@st.cache_data
-def build_vectors(documents, max_df=0.9, min_df=2):
-    cv = CountVectorizer(max_df=max_df, min_df=min_df, ngram_range=(1,1))
-    dtm = cv.fit_transform(documents)
-    tfidf = TfidfVectorizer(max_df=0.9, min_df=min_df)
-    tfidf_mat = tfidf.fit_transform(documents)
-    return cv, dtm, tfidf, tfidf_mat
-
-@st.cache_data
-def run_lda(dtm_array, n_topics=10, n_iter=3000, random_state=42):
-    model = lda.LDA(n_topics=n_topics, n_iter=n_iter, random_state=random_state)
-    model.fit(dtm_array)
-    return model
-
 def plot_wordcloud(freq_dict, width=900, height=450):
     wc = WordCloud(width=width, height=height, background_color='white', collocations=False)
     wc.generate_from_frequencies(freq_dict)
@@ -125,141 +105,101 @@ def plot_wordcloud(freq_dict, width=900, height=450):
     return fig
 
 # ---------------------------
-# Sidebar: Upload / options
+# Sidebar
 # ---------------------------
 st.sidebar.title("Controls")
-st.sidebar.markdown("Upload your Annual Report PDF (FY 2024-25).")
-uploaded_file = st.sidebar.file_uploader("Upload PDF", type=['pdf'])
-
-use_sample = st.sidebar.checkbox("Use sample uploaded Godrej PDF (if available on server)", value=False)
-
-min_df = st.sidebar.slider("min_df (CountVectorizer)", 1, 10, 2)
-n_topics = st.sidebar.slider("Number of LDA topics", 2, 15, 10)
-n_iter = st.sidebar.slider("LDA iterations", 500, 8000, 3000, step=500)
-
-extra_stop = st.sidebar.text_input("Extra stopwords (comma-separated)", value="godrej,industries,ltd,limited,company,year")
+uploaded_file = st.sidebar.file_uploader("Upload Annual Report (PDF)", type=['pdf'])
+min_df = st.sidebar.slider("min_df (for Vectorizer)", 1, 10, 2)
+n_topics = st.sidebar.slider("Number of Topics", 2, 15, 10)
+extra_stop = st.sidebar.text_input("Extra stopwords (comma-separated)",
+                                   value="godrej,industries,ltd,limited,company,year,report")
 extra_stopwords = [s.strip().lower() for s in extra_stop.split(",") if s.strip()]
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**App features:**")
-st.sidebar.markdown("- Upload PDF or use sample\n- Section-based segmentation (heuristic)\n- Sentence-level sentiment (TextBlob)\n- Wordcloud + top frequent words\n- TF-IDF & Document-Term Matrix\n- LDA topic modelling (Gibbs sampling)\n- Download CSV outputs")
+st.sidebar.markdown("**This app performs:**")
+st.sidebar.markdown("- PDF extraction & cleaning\n- Sentiment analysis\n- WordCloud\n- Topic Modeling (LDA)\n- CSV downloads")
 
 # ---------------------------
-# Main UI
+# Main App Logic
 # ---------------------------
-st.title("📄 Godrej Annual Report (FY 2024–25) — NLP Explorer")
-st.markdown("Interactive Streamlit app to extract, analyze, and visualize text from an annual report. "
-            "Use the sidebar to upload a PDF and tune modelling parameters.")
+st.title("📄 Godrej Industries Annual Report (FY 2024–25) — NLP Explorer")
 
-if uploaded_file is None and not use_sample:
-    st.info("Upload the Godrej Annual Report PDF (.pdf) from the sidebar, or tick the sample option.")
+if uploaded_file is None:
+    st.info("📤 Please upload the Godrej Annual Report PDF using the sidebar.")
     st.stop()
 
-# Save uploaded to temp file (pdfplumber can open BytesIO directly; convert to file-like)
-file_like = None
-if uploaded_file:
-    file_like = uploaded_file
-else:
-    # If you're running locally and want to use a pre-uploaded path, check standard locations
-    # (This branch will rarely be used on Streamlit Cloud)
-    sample_paths = ['/content/GIL_Annual_Report_2024-25.pdf', '/mnt/data/GIL_Annual_Report_2024-25.pdf']
-    sample_path = None
-    for p in sample_paths:
-        if os.path.exists(p):
-            sample_path = p
-            break
-    if sample_path:
-        file_like = open(sample_path, 'rb')
-    else:
-        st.error("Sample file not found on server. Please upload PDF.")
-        st.stop()
+# Extract pages
+with st.spinner("Extracting text from PDF..."):
+    df_pages = extract_pdf_text(uploaded_file)
+st.success(f"Extracted {len(df_pages)} pages successfully!")
 
-# ---------------------------
-# Extract pages -> DataFrame
-# ---------------------------
-with st.spinner("Extracting text from PDF (this may take a while for large PDFs)..."):
-    df_pages = extract_pdf_text(file_like)
-st.success(f"Extracted {len(df_pages)} pages.")
-
-# Show first pages preview
-with st.expander("Preview: first 3 pages (raw text)"):
-    for i in range(min(3, len(df_pages))):
+# Preview
+with st.expander("Preview of first 2 pages"):
+    for i in range(min(2, len(df_pages))):
         st.write(f"### Page {df_pages.loc[i,'page']}")
-        st.write(df_pages.loc[i,'text'][:2000] + ("..." if len(df_pages.loc[i,'text']) > 2000 else ""))
+        st.write(df_pages.loc[i,'text'][:1500])
 
-# Build full raw text and clean
-full_raw = " ".join(df_pages['text'].fillna('').tolist())
+# Combine and clean
+full_raw = " \n ".join(df_pages['text'].fillna('').tolist())
 full_clean = preprocess_text(full_raw, extra_stopwords=extra_stopwords)
 
-# Section segmentation attempt
+# Section segmentation
 sections = section_segmentation(full_raw)
 if sections and len(sections) >= 4:
-    st.success(f"Section-based segmentation detected {len(sections)} sections — using sections as documents.")
+    st.success(f"✅ Found {len(sections)} sections. Using sections for topic modeling.")
     df_sections = pd.DataFrame(sections)
     df_sections['clean'] = df_sections['content'].apply(lambda t: preprocess_text(t, extra_stopwords=extra_stopwords))
     documents = df_sections['clean'].tolist()
     use_sections = True
 else:
-    st.warning("Section-based segmentation did not detect reliable headings. Falling back to using pages as documents.")
-    df_pages['clean'] = df_pages['text'].fillna('').apply(lambda t: preprocess_text(t, extra_stopwords=extra_stopwords))
+    st.warning("⚠️ Section segmentation unreliable. Using pages instead.")
+    df_pages['clean'] = df_pages['text'].apply(lambda t: preprocess_text(t, extra_stopwords=extra_stopwords))
     documents = df_pages['clean'].tolist()
     use_sections = False
 
-# Sentence-level sentiment
+# ---------------------------
+# Sentiment Analysis
+# ---------------------------
+st.subheader("🧠 Sentence-level Sentiment Analysis")
 sentences = sent_tokenize(full_raw)
 if len(sentences) > 0:
     df_sentiments = compute_sentiments(sentences)
-    st.subheader("Sentence-level Sentiment (summary)")
-    col1, col2, col3 = st.columns([2,1,1])
+    col1, col2 = st.columns([3,1])
     with col1:
-        st.write("Polarity distribution (negative→positive)")
-        fig = px.histogram(df_sentiments, x='polarity', nbins=40, labels={'polarity': 'Polarity'})
+        fig = px.histogram(df_sentiments, x='polarity', nbins=40, title='Polarity Distribution')
         st.plotly_chart(fig, use_container_width=True)
     with col2:
-        st.metric("Avg polarity", f"{df_sentiments['polarity'].mean():.3f}")
-    with col3:
-        st.metric("Avg subjectivity", f"{df_sentiments['subjectivity'].mean():.3f}")
-
-    # Show most positive and most negative sentences
-    top_pos = df_sentiments.sort_values('polarity', ascending=False).head(5)
-    top_neg = df_sentiments.sort_values('polarity', ascending=True).head(5)
-    with st.expander("Top positive sentences"):
-        for idx, row in top_pos.iterrows():
-            st.write(f"**Polarity {row['polarity']:.3f}** — {row['sentence']}")
-    with st.expander("Top negative sentences"):
-        for idx, row in top_neg.iterrows():
-            st.write(f"**Polarity {row['polarity']:.3f}** — {row['sentence']}")
+        st.metric("Avg Polarity", f"{df_sentiments['polarity'].mean():.3f}")
+        st.metric("Avg Subjectivity", f"{df_sentiments['subjectivity'].mean():.3f}")
 else:
     st.info("No sentences found for sentiment analysis.")
 
-# Word tokens and word frequency
-st.subheader("Word Frequency & WordCloud")
+# ---------------------------
+# Word Frequency & WordCloud
+# ---------------------------
+st.subheader("🔤 Word Frequency & WordCloud")
 word_tokens = word_tokenize(full_clean)
 freq = Counter(word_tokens)
-top_n = 50
-top_words = freq.most_common(top_n)
+top_words = freq.most_common(100)
 freq_df = pd.DataFrame(top_words, columns=['word','freq'])
-col1, col2 = st.columns([2,3])
+col1, col2 = st.columns([1,2])
 with col1:
-    st.table(freq_df.head(15))
+    st.dataframe(freq_df.head(20))
 with col2:
-    wc_fig = plot_wordcloud(dict(top_words))
-    st.pyplot(wc_fig)
+    fig_wc = plot_wordcloud(dict(top_words))
+    st.pyplot(fig_wc)
 
 # ---------------------------
-# Topic Modeling (using Gensim)
+# Topic Modeling (Gensim LDA)
 # ---------------------------
-from gensim import corpora, models
-
-st.subheader("Topic Modeling (LDA - Gensim)")
+st.subheader("📊 Topic Modeling (LDA via Gensim)")
 st.markdown(f"Documents used: **{len(documents)}** — Topics: **{n_topics}**")
 
-# Tokenize each document
 texts = [doc.split() for doc in documents]
 dictionary = corpora.Dictionary(texts)
 corpus = [dictionary.doc2bow(text) for text in texts]
 
-with st.spinner("Training LDA model using Gensim..."):
+with st.spinner("Training LDA Model..."):
     lda_model = models.LdaModel(
         corpus=corpus,
         id2word=dictionary,
@@ -267,34 +207,49 @@ with st.spinner("Training LDA model using Gensim..."):
         passes=10,
         random_state=42
     )
+st.success("LDA Model Trained Successfully!")
 
-st.success(f"LDA model trained successfully with {n_topics} topics!")
-
-# Display the top words for each topic
+# Show topics
 for idx, topic in lda_model.print_topics(num_topics=n_topics, num_words=10):
     st.markdown(f"**Topic {idx+1}**: {topic}")
 
-# Assign dominant topic for each document
+# Assign dominant topic
 dominant_topics = []
 for doc_bow in corpus:
     topic_probs = lda_model.get_document_topics(doc_bow)
     dominant = max(topic_probs, key=lambda x: x[1])[0] + 1 if topic_probs else 0
     dominant_topics.append(dominant)
 
-# Attach topic assignments
+# Add to dataframe
 if use_sections:
     df_sections['dominant_topic'] = dominant_topics
-    st.dataframe(df_sections[['section_heading', 'dominant_topic']].head(10))
-    csv_sections = df_sections.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download sections + topics (CSV)", csv_sections, file_name="sections_with_topics.csv")
+    st.dataframe(df_sections[['section_heading','dominant_topic']].head(10))
+    csv_data = df_sections.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Sections with Topics (CSV)", csv_data, file_name="sections_with_topics.csv")
 else:
     df_pages['dominant_topic'] = dominant_topics
-    st.dataframe(df_pages[['page', 'dominant_topic']].head(10))
-    csv_pages = df_pages.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download pages + topics (CSV)", csv_pages, file_name="pages_with_topics.csv")
+    st.dataframe(df_pages[['page','dominant_topic']].head(10))
+    csv_data = df_pages.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Pages with Topics (CSV)", csv_data, file_name="pages_with_topics.csv")
 
-# Visualize topic distribution
+# Topic distribution chart
 topic_counts = pd.Series(dominant_topics).value_counts().sort_index()
-fig = go.Figure(data=[go.Bar(x=topic_counts.index, y=topic_counts.values)])
-fig.update_layout(title="Topic Distribution", xaxis_title="Topic", yaxis_title="Document Count")
-st.plotly_chart(fig, use_container_width=True)
+fig_bar = go.Figure([go.Bar(x=topic_counts.index, y=topic_counts.values)])
+fig_bar.update_layout(title="Topic Distribution Across Documents",
+                      xaxis_title="Topic", yaxis_title="Count")
+st.plotly_chart(fig_bar, use_container_width=True)
+
+# ---------------------------
+# Downloads
+# ---------------------------
+st.subheader("📁 Downloadable Outputs")
+if 'df_sentiments' in locals():
+    st.download_button("📥 Download Sentence Sentiments (CSV)",
+                       df_sentiments.to_csv(index=False).encode('utf-8'),
+                       file_name="sentence_sentiments.csv")
+st.download_button("📥 Download Word Frequencies (CSV)",
+                   freq_df.to_csv(index=False).encode('utf-8'),
+                   file_name="word_freq.csv")
+
+st.markdown("---")
+st.caption("Developed by Lokesh — NLP Mini Project (Godrej Annual Report FY 2024–25)")
