@@ -27,14 +27,34 @@ st.set_page_config(page_title="Godrej Annual Report — NLP Explorer",
                    initial_sidebar_state="expanded")
 
 # ---------------------------
-# NLTK Setup
+# NLTK Setup (fixed for Streamlit Cloud)
 # ---------------------------
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
 @st.cache_resource
 def download_nltk_resources():
-    nltk.download('punkt')
-    nltk.download('stopwords')
-    nltk.download('wordnet')
-    nltk.download('omw-1.4')
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab')
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+    try:
+        nltk.data.find('corpora/wordnet')
+    except LookupError:
+        nltk.download('wordnet')
+    try:
+        nltk.data.find('corpora/omw-1.4')
+    except LookupError:
+        nltk.download('omw-1.4')
 
 download_nltk_resources()
 stop_words = set(stopwords.words('english'))
